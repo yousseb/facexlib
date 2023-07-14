@@ -2,10 +2,12 @@ import argparse
 import cv2
 import numpy as np
 import os
+
+import onnxruntime
 import torch
 from torchvision.transforms.functional import normalize
 
-from facexlib.parsing import init_parsing_model
+from facexlib.parsing import init_parsing_model, export_to_onnx
 from facexlib.utils.misc import img2tensor
 
 
@@ -39,7 +41,40 @@ def vis_parsing_maps(img, parsing_anno, stride, save_anno_path=None, save_vis_pa
 
 
 def main(img_path, output):
-    net = init_parsing_model(model_name='bisenet')
+    if args.to_onnx:
+        export_to_onnx(model_name='parsenet')
+        exit(0)
+
+    if args.onnx:
+        img_name = os.path.basename(img_path)
+        img_basename = os.path.splitext(img_name)[0]
+
+        img_input = cv2.imread(img_path)
+        img_input = cv2.resize(img_input, (512, 512), interpolation=cv2.INTER_LINEAR)
+        img = cv2.cvtColor(img_input, cv2.COLOR_BGR2RGB)
+        img = img.transpose(2, 0, 1)
+        img = img.astype('float32')
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        for i in range(img.shape[0]):
+            img[i, :, :] = (img[i, :, :] / 255. - mean[i]) / std[i]
+        img = np.expand_dims(img, axis=0)
+
+        ort_session = onnxruntime.InferenceSession("facexlib/weights/parsing_parsenet.onnx")
+        ort_inputs = {ort_session.get_inputs()[0].name: img}
+        ort_outs = ort_session.run(None, ort_inputs)
+
+        out = np.squeeze(ort_outs[0], axis=0).argmax(0)
+
+        vis_parsing_maps(
+            img_input,
+            out,
+            stride=1,
+            save_anno_path=os.path.join(output, f'{img_basename}-onnx.png'),
+            save_vis_path=os.path.join(output, f'{img_basename}-onnx_vis.png'))
+        exit(0)
+
+    net = init_parsing_model(model_name='parsenet', device='cpu')
 
     img_name = os.path.basename(img_path)
     img_basename = os.path.splitext(img_name)[0]
@@ -48,7 +83,7 @@ def main(img_path, output):
     img_input = cv2.resize(img_input, (512, 512), interpolation=cv2.INTER_LINEAR)
     img = img2tensor(img_input.astype('float32') / 255., bgr2rgb=True, float32=True)
     normalize(img, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225), inplace=True)
-    img = torch.unsqueeze(img, 0).cuda()
+    img = torch.unsqueeze(img, 0).cpu()
 
     with torch.no_grad():
         out = net(img)[0]
@@ -65,8 +100,10 @@ def main(img_path, output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--input', type=str, default='datasets/ffhq/ffhq_512/00000000.png')
+    parser.add_argument('--input', type=str, default='assets/test2.jpg')
     parser.add_argument('--output', type=str, default='results', help='output folder')
+    parser.add_argument('--to-onnx', action='store_true')
+    parser.add_argument('--onnx', action='store_false')
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
